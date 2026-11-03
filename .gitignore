@@ -1,0 +1,11 @@
+# Artefactos de ejecución y escaneos
+zap/
+semgrep.json
+semgrep.sarif
+semgrep.txt
+*.log
+
+# Sistema
+.DS_Store
+Thumbs.db
+*~
