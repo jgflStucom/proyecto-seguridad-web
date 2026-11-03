@@ -5,8 +5,11 @@ pipeline {
     buildDiscarder(logRotator(numToKeepStr: '10'))
     disableConcurrentBuilds()
   }
+  parameters {
+    string(name: 'LAB_REPO', defaultValue: 'https://github.com/jgflStucom/WebsVulnerables',
+           description: 'Repositorio del laboratorio a analizar (fork propio o repositorio original)')
+  }
   environment {
-    REPO_URL      = 'https://github.com/jgflStucom/WebsVulnerables'
     SEMGREP_IMAGE = 'semgrep/semgrep:latest'
   }
   stages {
@@ -14,7 +17,7 @@ pipeline {
       steps {
         sh '''
           rm -rf lab semgrep.json semgrep.sarif semgrep.txt
-          git clone --depth 1 ${REPO_URL} lab
+          git clone --depth 1 "${LAB_REPO}" lab
         '''
       }
     }
@@ -36,14 +39,14 @@ pipeline {
           tools: [sarif(pattern: 'semgrep.sarif', id: 'semgrep', name: 'Semgrep')],
           enabledForFailure: true
         )
-        script {
-          def informe = readJSON file: 'semgrep.json'
-          def n = informe.results ? informe.results.size() : 0
-          echo "Hallazgos SAST: ${n}"
-          if (n > 0) {
-            error("Gate SAST: ${n} hallazgo(s) bloqueante(s). Despliegue cancelado.")
-          }
-        }
+        sh '''
+          N=$(grep -o '"ruleId"' semgrep.json | wc -l | tr -d ' ')
+          echo "Hallazgos SAST: $N"
+          if [ "$N" -gt 0 ]; then
+            echo "Gate SAST: $N hallazgo(s) bloqueante(s). Despliegue cancelado."
+            exit 1
+          fi
+        '''
       }
     }
   }
