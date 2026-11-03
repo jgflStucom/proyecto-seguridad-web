@@ -12,8 +12,10 @@ pipeline {
   stages {
     stage('Checkout') {
       steps {
-        sh 'rm -f semgrep.json semgrep.sarif semgrep.txt'
-        git url: env.REPO_URL, branch: 'main'
+        sh '''
+          rm -rf lab semgrep.json semgrep.sarif semgrep.txt
+          git clone --depth 1 ${REPO_URL} lab
+        '''
       }
     }
     stage('SAST Semgrep') {
@@ -23,7 +25,7 @@ pipeline {
             semgrep scan --config p/php --config p/owasp-top-ten --metrics=off \
             --exclude db_data \
             --json-output=semgrep.json --sarif-output=semgrep.sarif --text-output=semgrep.txt \
-            --error --text . || true
+            --error --text lab || true
         '''
       }
     }
