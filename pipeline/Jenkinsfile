@@ -1,0 +1,48 @@
+pipeline {
+  agent any
+  options {
+    timestamps()
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    disableConcurrentBuilds()
+  }
+  environment {
+    REPO_URL      = 'https://github.com/jgflStucom/WebsVulnerables'
+    SEMGREP_IMAGE = 'semgrep/semgrep:latest'
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+        sh 'rm -f semgrep.json semgrep.sarif semgrep.txt'
+        git url: env.REPO_URL, branch: 'main'
+      }
+    }
+    stage('SAST Semgrep') {
+      steps {
+        sh '''
+          docker run --rm --volumes-from jenkins -w "$WORKSPACE" ${SEMGREP_IMAGE} \
+            semgrep scan --config p/php --config p/owasp-top-ten --metrics=off \
+            --exclude db_data \
+            --json-output=semgrep.json --sarif-output=semgrep.sarif --text-output=semgrep.txt \
+            --error --text . || true
+        '''
+      }
+    }
+    stage('Gate SAST') {
+      steps {
+        archiveArtifacts artifacts: 'semgrep.*', fingerprint: true
+        recordIssues(
+          tools: [sarif(pattern: 'semgrep.sarif', id: 'semgrep', name: 'Semgrep')],
+          enabledForFailure: true
+        )
+        script {
+          def informe = readJSON file: 'semgrep.json'
+          def n = informe.results ? informe.results.size() : 0
+          echo "Hallazgos SAST: ${n}"
+          if (n > 0) {
+            error("Gate SAST: ${n} hallazgo(s) bloqueante(s). Despliegue cancelado.")
+          }
+        }
+      }
+    }
+  }
+}
