@@ -11,6 +11,7 @@ pipeline {
   }
   environment {
     SEMGREP_IMAGE = 'semgrep/semgrep:latest'
+    ZAP_IMAGE     = 'ghcr.io/zaproxy/zaproxy:stable'
   }
   stages {
     stage('Checkout') {
@@ -19,7 +20,7 @@ pipeline {
           set -e
           echo "Repositorio a analizar: ${params.LAB_REPO}"
           test -n "${params.LAB_REPO}" || { echo "LAB_REPO vacio"; exit 2; }
-          rm -rf lab semgrep.json semgrep.sarif semgrep.txt
+          rm -rf lab zap compose.ci.yml semgrep.json semgrep.sarif semgrep.txt
           git clone --depth 1 "${params.LAB_REPO}" lab
         """
       }
@@ -51,6 +52,77 @@ pipeline {
           fi
         '''
       }
+    }
+    stage('Desplegar laboratorio') {
+      steps {
+        sh '''
+          cat > compose.ci.yml <<'YAML'
+services:
+  db1: { container_name: ci_mysql_examen_1, restart: "no" }
+  db2: { container_name: ci_mysql_examen_2, restart: "no" }
+  db3: { container_name: ci_mysql_examen_3, restart: "no" }
+  db4: { container_name: ci_mysql_examen_4, restart: "no" }
+  web1: { container_name: ci_web_examen_1, ports: !override ["55340:80"] }
+  web2: { container_name: ci_web_examen_2, ports: !override ["55350:80"] }
+  web3: { container_name: ci_web_examen_3, ports: !override ["55360:80"] }
+  web4: { container_name: ci_web_examen_4, ports: !override ["55370:80"] }
+YAML
+          docker compose -p examenweb-ci -f lab/ExamenWeb/docker-compose.yml -f compose.ci.yml up -d --build
+
+          echo "Esperando a MySQL..."
+          for n in 1 2 3 4; do
+            for i in $(seq 1 30); do
+              docker exec ci_mysql_examen_$n mysqladmin ping -uroot -proot_pass_examen$n --silent 2>/dev/null && break
+              sleep 2
+            done
+          done
+
+          echo "Comprobando los sitios..."
+          for p in 55340 55350 55360 55370; do
+            printf "  sitio %s -> " "$p"
+            curl -s -o /dev/null -w "%{http_code}\\n" "http://localhost:$p/"
+          done
+        '''
+      }
+    }
+    stage('DAST ZAP') {
+      steps {
+        sh '''
+          rm -rf zap && mkdir -p zap && chmod 777 zap
+          for s in "sitio1 55340" "sitio2 55350" "sitio3 55360"; do
+            set -- $s
+            echo "ZAP baseline contra $1 (http://localhost:$2)"
+            docker run --rm --name ci_zap --network host -v "$WORKSPACE/zap":/zap/wrk:rw \
+              ${ZAP_IMAGE} zap-baseline.py -t "http://localhost:$2" -a -m 1 \
+              -r "$1.html" -J "$1.json" -x "$1.xml" -w "$1.md" || true
+          done
+        '''
+      }
+    }
+    stage('Informes') {
+      steps {
+        archiveArtifacts artifacts: 'zap/*.html,zap/*.json,zap/*.xml,zap/*.md,semgrep.*', fingerprint: true
+        publishHTML(target: [
+          reportName: 'ZAP DAST',
+          reportDir: 'zap',
+          reportFiles: 'sitio1.html,sitio2.html,sitio3.html',
+          reportTitles: 'Sitio 1,Sitio 2,Sitio 3',
+          keepAll: true,
+          alwaysLinkToLastBuild: true,
+          allowMissing: true
+        ])
+      }
+    }
+  }
+  post {
+    always {
+      sh '''
+        docker compose -p examenweb-ci -f lab/ExamenWeb/docker-compose.yml -f compose.ci.yml down --remove-orphans 2>/dev/null || true
+        docker rm -f ci_zap 2>/dev/null || true
+        echo "===== Resumen ====="
+        grep -A4 "Scan Summary" semgrep.txt 2>/dev/null || true
+        ls -la zap 2>/dev/null || true
+      '''
     }
   }
 }
