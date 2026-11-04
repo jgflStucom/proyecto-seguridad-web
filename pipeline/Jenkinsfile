@@ -8,6 +8,8 @@ pipeline {
   parameters {
     string(name: 'LAB_REPO', defaultValue: 'https://github.com/jgflStucom/WebsVulnerables',
            description: 'Repositorio del laboratorio a analizar')
+    choice(name: 'ZAP_MODE', choices: ['baseline', 'full'],
+           description: 'baseline = pasivo; full = escaneo activo autenticado')
   }
   environment {
     SEMGREP_IMAGE = 'semgrep/semgrep:latest'
@@ -68,15 +70,12 @@ services:
   web4: { container_name: ci_web_examen_4, ports: !override ["55370:80"] }
 YAML
           docker compose -p examenweb-ci -f lab/ExamenWeb/docker-compose.yml -f compose.ci.yml up -d --build
-
-          echo "Esperando a MySQL..."
           for n in 1 2 3 4; do
             for i in $(seq 1 30); do
               docker exec ci_mysql_examen_$n mysqladmin ping -uroot -proot_pass_examen$n --silent 2>/dev/null && break
               sleep 2
             done
           done
-
           echo "Comprobando los sitios..."
           for p in 55340 55350 55360 55370; do
             printf "  sitio %s -> " "$p"
@@ -86,23 +85,107 @@ YAML
         '''
       }
     }
-    stage('DAST ZAP') {
+    stage('DAST ZAP autenticado') {
       steps {
-        sh '''
-          rm -rf zap && mkdir -p zap && chmod 777 zap
-          for s in "sitio1 55340" "sitio2 55350" "sitio3 55360"; do
-            set -- $s
-            echo "ZAP baseline contra $1 (http://localhost:$2)"
-            docker run --rm --name ci_zap --network host -v "$WORKSPACE/zap":/zap/wrk:rw \
-              ${ZAP_IMAGE} zap-baseline.py -t "http://localhost:$2" -a -m 1 \
-              -r "$1.html" -J "$1.json" -x "$1.xml" -w "$1.md" || true
-          done
-        '''
+        script {
+          sh 'rm -rf zap && mkdir -p zap && chmod 777 zap'
+
+          def plantilla = '''env:
+contexts:
+  - name: '__SITE__'
+    urls: ['http://localhost:__PORT__']
+    includePaths: ['http://localhost:__PORT__.*']
+    excludePaths: ['http://localhost:__PORT__/__LOGOUT__.*']
+    authentication:
+      method: 'form'
+      parameters:
+        loginPageUrl: 'http://localhost:__PORT__/__LOGIN__'
+        loginRequestUrl: 'http://localhost:__PORT__/__LOGIN__'
+        loginRequestBody: '__BODY__'
+      verification:
+        method: 'response'
+        loggedInRegex: '__DENTRO__'
+        loggedOutRegex: '__FUERA__'
+    sessionManagement:
+      method: 'cookie'
+    users:
+      - name: 'usuario'
+        credentials:
+          username: '${ZAP_USER}'
+          password: '${ZAP_PASS}'
+jobs:
+  - type: 'spider'
+    parameters: { context: '__SITE__', user: 'usuario', maxDuration: 2 }
+  - type: 'passiveScan-wait'
+__ACTIVE__
+  - type: 'report'
+    parameters: { template: 'traditional-html', reportDir: '/zap/wrk', reportFile: '__SITE__', reportTitle: 'ZAP __SITE__' }
+  - type: 'report'
+    parameters: { template: 'traditional-json', reportDir: '/zap/wrk', reportFile: '__SITE__', reportTitle: 'ZAP __SITE__' }
+'''
+
+          def bloqueActivo = '''
+  - type: 'activeScan'
+    parameters: { context: '__SITE__', user: 'usuario', maxScanDurationInMins: 10 }'''
+
+          def sitios = [
+            [n:'sitio1', p:'55340', c:'zap-sitio1', login:'index.php',
+             body:'user={%username%}&pass={%password%}', dentro:'logout', fuera:'name="pass"', logout:'logout.php'],
+            [n:'sitio2', p:'55350', c:'zap-sitio2', login:'login.php',
+             body:'username={%username%}&password={%password%}', dentro:'logout', fuera:'name="password"', logout:'logout.php'],
+            [n:'sitio3', p:'55360', c:'zap-sitio3', login:'login.php',
+             body:'username={%username%}&password={%password%}', dentro:'logout', fuera:'name="password"', logout:'login.php?logout=1'],
+          ]
+
+          sitios.each { s ->
+            def plan = plantilla
+              .replace('__SITE__', s.n)
+              .replace('__PORT__', s.p)
+              .replace('__LOGIN__', s.login)
+              .replace('__BODY__', s.body)
+              .replace('__DENTRO__', s.dentro)
+              .replace('__FUERA__', s.fuera)
+              .replace('__LOGOUT__', s.logout)
+              .replace('__ACTIVE__', params.ZAP_MODE == 'full' ? bloqueActivo.replace('__SITE__', s.n) : '')
+
+            writeFile file: "zap/plan-${s.n}.yaml", text: plan
+
+            withCredentials([usernamePassword(credentialsId: s.c, usernameVariable: 'ZAP_USER', passwordVariable: 'ZAP_PASS')]) {
+              sh """
+                docker run --rm --name ci_zap --network host -e ZAP_USER -e ZAP_PASS \\
+                  -v "\$WORKSPACE/zap":/zap/wrk:rw ${ZAP_IMAGE} \\
+                  zap.sh -cmd -port 8099 -autorun /zap/wrk/plan-${s.n}.yaml || true
+              """
+            }
+          }
+        }
+      }
+    }
+    stage('Gate DAST') {
+      steps {
+        archiveArtifacts artifacts: 'zap/*.html,zap/*.json,semgrep.*', fingerprint: true
+        script {
+          def rc = sh(returnStatus: true, script: '''
+            H=0
+            for f in zap/*.json; do
+              n=$(grep -o '"riskcode": *"3"' "$f" | wc -l | tr -d ' ')
+              m=$(grep -o '"riskcode": *"2"' "$f" | wc -l | tr -d ' ')
+              echo "$(basename "$f"): High=$n Medium=$m"
+              H=$((H+n))
+            done
+            echo "TOTAL High: $H"
+            if [ "$H" -gt 0 ]; then
+              echo "Gate DAST: $H alerta(s) de riesgo alto. Despliegue bloqueado."
+              exit 1
+            fi
+          ''')
+          if (rc == 1) { error('Gate DAST: alertas de riesgo alto. Despliegue bloqueado.') }
+          else if (rc != 0) { error("El gate DAST fallo con codigo ${rc}") }
+        }
       }
     }
     stage('Informes') {
       steps {
-        archiveArtifacts artifacts: 'zap/*.html,zap/*.json,zap/*.xml,zap/*.md,semgrep.*', fingerprint: true
         publishHTML(target: [
           reportName: 'ZAP DAST',
           reportDir: 'zap',
@@ -120,9 +203,6 @@ YAML
       sh '''
         docker compose -p examenweb-ci -f lab/ExamenWeb/docker-compose.yml -f compose.ci.yml down --remove-orphans 2>/dev/null || true
         docker rm -f ci_zap 2>/dev/null || true
-        echo "===== Resumen ====="
-        grep -A4 "Scan Summary" semgrep.txt 2>/dev/null || true
-        ls -la zap 2>/dev/null || true
       '''
     }
   }
