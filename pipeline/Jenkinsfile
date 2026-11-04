@@ -7,7 +7,7 @@ pipeline {
   }
   parameters {
     string(name: 'LAB_REPO', defaultValue: 'https://github.com/jgflStucom/WebsVulnerables',
-           description: 'Repositorio del laboratorio a analizar (fork propio o repositorio original)')
+           description: 'Repositorio del laboratorio a analizar')
   }
   environment {
     SEMGREP_IMAGE = 'semgrep/semgrep:latest'
@@ -15,10 +15,13 @@ pipeline {
   stages {
     stage('Checkout') {
       steps {
-        sh '''
+        sh """
+          set -e
+          echo "Repositorio a analizar: ${params.LAB_REPO}"
+          test -n "${params.LAB_REPO}" || { echo "LAB_REPO vacio"; exit 2; }
           rm -rf lab semgrep.json semgrep.sarif semgrep.txt
-          git clone --depth 1 "${LAB_REPO}" lab
-        '''
+          git clone --depth 1 "${params.LAB_REPO}" lab
+        """
       }
     }
     stage('SAST Semgrep') {
