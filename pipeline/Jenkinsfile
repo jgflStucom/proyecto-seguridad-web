@@ -91,28 +91,32 @@ YAML
           sh 'rm -rf zap && mkdir -p zap && chmod 777 zap'
 
           def plantilla = '''env:
-contexts:
-  - name: '__SITE__'
-    urls: ['http://localhost:__PORT__']
-    includePaths: ['http://localhost:__PORT__.*']
-    excludePaths: ['http://localhost:__PORT__/__LOGOUT__.*']
-    authentication:
-      method: 'form'
-      parameters:
-        loginPageUrl: 'http://localhost:__PORT__/__LOGIN__'
-        loginRequestUrl: 'http://localhost:__PORT__/__LOGIN__'
-        loginRequestBody: '__BODY__'
-      verification:
-        method: 'response'
-        loggedInRegex: '__DENTRO__'
-        loggedOutRegex: '__FUERA__'
-    sessionManagement:
-      method: 'cookie'
-    users:
-      - name: 'usuario'
-        credentials:
-          username: '${ZAP_USER}'
-          password: '${ZAP_PASS}'
+  contexts:
+    - name: '__SITE__'
+      urls: ['http://localhost:__PORT__']
+      includePaths: ['http://localhost:__PORT__.*']
+      excludePaths: ['http://localhost:__PORT__/__LOGOUT__.*']
+      authentication:
+        method: 'form'
+        parameters:
+          loginPageUrl: 'http://localhost:__PORT__/__LOGIN__'
+          loginRequestUrl: 'http://localhost:__PORT__/__LOGIN__'
+          loginRequestBody: '__BODY__'
+        verification:
+          method: 'response'
+          loggedInRegex: '__DENTRO__'
+          loggedOutRegex: '__FUERA__'
+      sessionManagement:
+        method: 'cookie'
+      users:
+        - name: 'usuario'
+          credentials:
+            username: '${ZAP_USER}'
+            password: '${ZAP_PASS}'
+  parameters:
+    failOnError: true
+    failOnWarning: false
+    progressToStdout: true
 jobs:
   - type: 'spider'
     parameters: { context: '__SITE__', user: 'usuario', maxDuration: 2 }
@@ -166,6 +170,7 @@ __ACTIVE__
         archiveArtifacts artifacts: 'zap/*.html,zap/*.json,semgrep.*', fingerprint: true
         script {
           def rc = sh(returnStatus: true, script: '''
+            ls zap/*.json >/dev/null 2>&1 || { echo "No hay informes JSON: el escaneo no se ejecuto"; exit 2; }
             H=0
             for f in zap/*.json; do
               n=$(grep -o '"riskcode": *"3"' "$f" | wc -l | tr -d ' ')
