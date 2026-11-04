@@ -80,7 +80,8 @@ YAML
           echo "Comprobando los sitios..."
           for p in 55340 55350 55360 55370; do
             printf "  sitio %s -> " "$p"
-            curl -s -o /dev/null -w "%{http_code}\\n" "http://localhost:$p/"
+            code=$(docker run --rm --network host ${ZAP_IMAGE} curl -s -o /dev/null -w "%{http_code}" "http://localhost:$p/")
+            echo "$code"
           done
         '''
       }
